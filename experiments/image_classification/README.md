@@ -1,47 +1,43 @@
-# 图像分类实验
+# IterBatch 实验说明
 
-## 实验目的
-本实验旨在验证ABR策略在图像分类任务上的有效性，比较不同训练策略对模型性能和收敛速度的影响。
+本目录下的 `main.py` 实现了三种批训练策略的对比实验：
 
-## 实验设置
-- **模型**：ResNet-18/Transformer/CNN
-- **数据集**：MNIST/CIFAR-10/ImageNet
-- **指标**：准确率(accuracy)、损失值(loss)
+## 实验方案
+1. **Baseline**：每个 batch 只训练一次，记录每轮平均 loss 和 accuracy。
+2. **Loss-only 决策网络**：每个 batch 用当前 loss 作为输入，MLP 判决是否重复训练该 batch（重复一次）。
+3. **Context 决策网络**：每个 batch 用当前 loss 和前 10 步 loss 均值作为输入，MLP 判决是否重复训练该 batch。
 
-## 实验流程
-1. **基线实验**：每个batch只训练一次
-2. **ABR策略实验**：根据loss动态调整batch的训练次数
-3. **可学习调度实验**：使用神经网络学习最优训练次数
+三种实验均使用相同的模型初始参数，保证公平性。每种实验有独立优化器。
 
-## 目录结构
-```
-image_classification/
-├── README.md
-├── environment.yml  # 环境配置文件
-├── model.py        # 模型定义
-├── data_loader.py  # 数据加载
-├── strategy.py     # 训练策略
-├── train.py        # 训练脚本
-└── results/        # 实验结果
-```
+## 主要参数
+- 训练轮数（epoch）：7
+- 批大小（batch_size）：64
+- 主模型学习率：0.01
+- 决策网络学习率：1e-4
+- 滑动窗口大小（context）：10
 
-## 环境设置
-推荐使用Anaconda创建独立虚拟环境：
-```bash
-# 创建环境
-conda env create -f environment.yml
-
-# 激活环境
-conda activate abr-image-classification
-```
+## 可视化输出
+- **TensorBoard**：所有实验的 loss/accuracy 曲线均写入 `result/runs/iterbatch_exp` 日志目录。
+- **PNG 图表**：训练结束后自动生成 `result/iterbatch_exp_results.png`，对比三组实验的 loss 和 accuracy 曲线。
 
 ## 运行方法
-```bash
-cd /root/IterBatch/experiments/image_classification
-# 确保已激活环境
-conda activate abr-image-classification
-python train.py --model resnet18 --dataset cifar10 --strategy abr
-```
+1. 安装依赖（建议 Python 3.8+，需提前安装好 torch、torchvision、numpy、matplotlib、tensorboard）：
+   ```bash
+   pip install torch torchvision numpy==1.26.4 matplotlib tensorboard
+   ```
+2. 运行实验脚本：
+   ```bash
+   python main.py
+   ```
+3. 查看 TensorBoard 曲线：
+   ```bash
+   tensorboard --logdir=./result/runs
+   ```
+   浏览器访问 http://localhost:6006
+4. 查看 PNG 图表：
+   训练结束后会在 `result/` 目录生成 `iterbatch_exp_results.png`，可直接打开查看。
 
-## 预期结果
-我们期望ABR策略能够在更少的训练步骤内达到与基线相当或更好的准确率，同时提高模型对困难样本的学习能力。
+## 备注
+- 若遇到 numpy 2.x 兼容性问题，请降级 numpy 至 1.26.4。
+- MNIST 数据集会自动下载到 `data/` 目录。
+- 如需自定义参数，可直接修改脚本内的超参数设置。
