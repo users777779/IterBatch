@@ -6,6 +6,7 @@ import os
 import time
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 from model import MLP
 from data_loader import HousingDataLoader
 from strategy import BaselineStrategy, ABRStrategy, LearnableSchedulingStrategy, SlidingWindowStrategy
@@ -41,6 +42,11 @@ def train(args):
         f.write(f'Learning rate: {args.lr}\n')
         f.write(f'Hidden dimension: {args.hidden_dim}\n')
         f.write('\n')
+
+    # 创建TensorBoard日志写入器
+    tb_log_dir = os.path.join(args.save_dir, 'tensorboard_logs')
+    os.makedirs(tb_log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=tb_log_dir)
 
     # 加载数据
     print('Loading dataset...')
@@ -198,6 +204,39 @@ def train(args):
         strategy_learnable.save_metrics(epoch+1, avg_loss_learnable, avg_rmse_learnable, avg_mae_learnable, test_loss_learnable, test_rmse_learnable, test_mae_learnable)
         strategy_window.save_metrics(epoch+1, avg_loss_window, avg_rmse_window, avg_mae_window, test_loss_window, test_rmse_window, test_mae_window)
 
+        # 记录指标到TensorBoard
+        global_step = epoch * len(train_loader) + batch_idx
+        writer.add_scalar('Loss/Baseline/Train', avg_loss_base, epoch+1)
+        writer.add_scalar('Loss/ABR/Train', avg_loss_abr, epoch+1)
+        writer.add_scalar('Loss/Learnable/Train', avg_loss_learnable, epoch+1)
+        writer.add_scalar('Loss/Window/Train', avg_loss_window, epoch+1)
+        writer.add_scalar('Loss/Baseline/Test', test_loss_base, epoch+1)
+        writer.add_scalar('Loss/ABR/Test', test_loss_abr, epoch+1)
+        writer.add_scalar('Loss/Learnable/Test', test_loss_learnable, epoch+1)
+        writer.add_scalar('Loss/Window/Test', test_loss_window, epoch+1)
+
+        writer.add_scalar('RMSE/Baseline/Train', avg_rmse_base, epoch+1)
+        writer.add_scalar('RMSE/ABR/Train', avg_rmse_abr, epoch+1)
+        writer.add_scalar('RMSE/Learnable/Train', avg_rmse_learnable, epoch+1)
+        writer.add_scalar('RMSE/Window/Train', avg_rmse_window, epoch+1)
+        writer.add_scalar('RMSE/Baseline/Test', test_rmse_base, epoch+1)
+        writer.add_scalar('RMSE/ABR/Test', test_rmse_abr, epoch+1)
+        writer.add_scalar('RMSE/Learnable/Test', test_rmse_learnable, epoch+1)
+        writer.add_scalar('RMSE/Window/Test', test_rmse_window, epoch+1)
+
+        writer.add_scalar('MAE/Baseline/Train', avg_mae_base, epoch+1)
+        writer.add_scalar('MAE/ABR/Train', avg_mae_abr, epoch+1)
+        writer.add_scalar('MAE/Learnable/Train', avg_mae_learnable, epoch+1)
+        writer.add_scalar('MAE/Window/Train', avg_mae_window, epoch+1)
+        writer.add_scalar('MAE/Baseline/Test', test_mae_base, epoch+1)
+        writer.add_scalar('MAE/ABR/Test', test_mae_abr, epoch+1)
+        writer.add_scalar('MAE/Learnable/Test', test_mae_learnable, epoch+1)
+        writer.add_scalar('MAE/Window/Test', test_mae_window, epoch+1)
+
+        writer.add_scalar('Repeats/ABR', avg_repeats_abr, epoch+1)
+        writer.add_scalar('Repeats/Learnable', avg_repeats_learnable, epoch+1)
+        writer.add_scalar('Repeats/Window', avg_repeats_window, epoch+1)
+
         epoch_time = time.time() - epoch_start_time
         print(f"Epoch {epoch+1}/{args.epochs}, 训练时间: {epoch_time:.2f}秒")
         print(f"  基线策略 - 训练损失: {avg_loss_base:.4f}, RMSE: {avg_rmse_base:.4f}, MAE: {avg_mae_base:.4f}")
@@ -208,6 +247,9 @@ def train(args):
         print(f"  ABR策略   - 测试损失: {test_loss_abr:.4f}, RMSE: {test_rmse_abr:.4f}, MAE: {test_mae_abr:.4f}")
         print(f"  可学习策略 - 测试损失: {test_loss_learnable:.4f}, RMSE: {test_rmse_learnable:.4f}, MAE: {test_mae_learnable:.4f}")
         print(f"  滑动窗口策略 - 测试损失: {test_loss_window:.4f}, RMSE: {test_rmse_window:.4f}, MAE: {test_mae_window:.4f}")
+
+    # 关闭TensorBoard写入器
+    writer.close()
 
     total_time = time.time() - start_time
     print(f"训练完成! 总时间: {total_time:.2f}秒")
