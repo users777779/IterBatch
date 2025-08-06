@@ -1,8 +1,9 @@
 import torch
+import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 class BaseTrainingStrategy:
     """训练策略基类"""
@@ -146,6 +147,60 @@ class LearnableSchedulingStrategy(BaseTrainingStrategy):
             'initial_loss': initial_loss.item(),
             'predicted_repeats': repeat_count,
             'loss_history': batch_history
+        })
+
+        return avg_loss, repeat_count
+
+
+class SlidingWindowStrategy(BaseTrainingStrategy):
+    """滑动窗口策略：根据最近批次的损失变化趋势调整重复训练次数"""
+    def __init__(self, model, criterion, optimizer, window_size=5, loss_threshold=0.5, max_repeats=1):
+        super(SlidingWindowStrategy, self).__init__(model, criterion, optimizer)
+        self.window_size = window_size
+        self.loss_threshold = loss_threshold
+        self.max_repeats = max_repeats
+        self.loss_window = deque(maxlen=window_size)  # 维护最近window_size个批次的损失
+        self.batch_history = []
+
+    def train_batch(self, inputs, targets):
+        self.model.train()
+        total_loss = 0
+        repeat_count = 1  # 默认训练一次
+
+        # 初始前向传播，获取损失
+        initial_outputs = self.model(inputs)
+        initial_loss = self.criterion(initial_outputs, targets).item()
+
+        # 决定重复训练次数
+        if len(self.loss_window) >= self.window_size:
+            # 计算最近窗口内的损失变化趋势
+            recent_losses = list(self.loss_window)
+            trend = np.polyfit(range(len(recent_losses)), recent_losses, 1)[0]
+
+            # 如果损失呈上升趋势且当前损失高于阈值，则增加重复次数
+            if trend > 0 and initial_loss > self.loss_threshold:
+                repeat_count = min(2, self.max_repeats)  # 最多重复1次（总共训练2次）
+
+        # 重复训练
+        batch_history = []
+        for i in range(repeat_count):
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs, targets)
+            loss.backward()
+            self.optimizer.step()
+            batch_history.append(loss.item())
+            total_loss += loss.item()
+
+        # 更新损失窗口
+        self.loss_window.append(initial_loss)
+
+        avg_loss = total_loss / repeat_count
+        self.batch_history.append({
+            'initial_loss': initial_loss,
+            'repeat_count': repeat_count,
+            'loss_history': batch_history,
+            'window_trend': np.polyfit(range(len(self.loss_window)), list(self.loss_window), 1)[0] if len(self.loss_window) >= 2 else 0
         })
 
         return avg_loss, repeat_count
