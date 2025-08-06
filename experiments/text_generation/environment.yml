@@ -1,0 +1,17 @@
+name: abr-text-generation
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch=1.12.1
+  - cudatoolkit=11.6
+  - numpy=1.23.3
+  - pip=22.2.2
+  - pip:
+    - transformers==4.24.0
+    - datasets==2.6.1
+    - peft==0.3.0
+    - accelerate==0.14.0
+    - bitsandbytes==0.35.0
