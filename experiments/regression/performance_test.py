@@ -12,29 +12,27 @@ from strategy import BaselineStrategy, ABRStrategy, LearnableSchedulingStrategy,
 import pandas as pd
 from tqdm import tqdm
 
-# 设置中文字体
-plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
-plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+# Removed Chinese font settings
 
 def parse_args():    
-    parser = argparse.ArgumentParser(description='回归任务性能测试')
+    parser = argparse.ArgumentParser(description='Regression Task Performance Test')
     parser.add_argument('--dataset', type=str, default='california', choices=['california', 'boston'],
-                        help='数据集选择 (california/boston)')
-    parser.add_argument('--batch_size', type=int, default=5, help='批次大小')
-    parser.add_argument('--epochs', type=int, default=5, help='训练轮数')
-    parser.add_argument('--lr', type=float, default=0.001, help='学习率')
-    parser.add_argument('--hidden_dim', type=int, default=64, help='隐藏层维度')
-    parser.add_argument('--loss_threshold', type=float, default=0.5, help='ABR策略的损失阈值')
-    parser.add_argument('--max_repeats', type=int, default=5, help='ABR策略的最大重复次数')
-    parser.add_argument('--window_size', type=int, default=5, help='滑动窗口策略的窗口大小')
-    parser.add_argument('--save_dir', type=str, default='performance_results', help='结果保存目录')
-    parser.add_argument('--num_runs', type=int, default=3, help='每种策略运行的次数，取平均值')
+                        help='Dataset selection (california/boston)')
+    parser.add_argument('--batch_size', type=int, default=5, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--hidden_dim', type=int, default=64, help='Hidden layer dimension')
+    parser.add_argument('--loss_threshold', type=float, default=0.5, help='Loss threshold for ABR strategy')
+    parser.add_argument('--max_repeats', type=int, default=5, help='Maximum repeats for ABR strategy')
+    parser.add_argument('--window_size', type=int, default=5, help='Window size for sliding window strategy')
+    parser.add_argument('--save_dir', type=str, default='performance_results', help='Directory to save results')
+    parser.add_argument('--num_runs', type=int, default=3, help='Number of runs per strategy (average will be taken)')
     return parser.parse_args()
 
 
 def test_strategy(strategy_name, model, criterion, optimizer, train_loader, test_loader, args, scheduler_model=None, scheduler_optimizer=None):
     """
-    测试单一策略的性能
+    Test the performance of a single strategy
     """
     # 创建训练策略
     if strategy_name == 'baseline':
@@ -46,7 +44,7 @@ def test_strategy(strategy_name, model, criterion, optimizer, train_loader, test
     elif strategy_name == 'window':
         strategy = SlidingWindowStrategy(model, criterion, optimizer, args.window_size, args.loss_threshold, args.max_repeats)
     else:
-        raise ValueError(f"不支持的策略: {strategy_name}")
+        raise ValueError(f"Unsupported strategy: {strategy_name}")
 
     # 训练循环
     start_time = time.time()
@@ -56,7 +54,7 @@ def test_strategy(strategy_name, model, criterion, optimizer, train_loader, test
         model.train()
         epoch_repeats = 0
 
-        for inputs, targets in tqdm(train_loader, desc=f"{strategy_name} 策略 Epoch {epoch+1}/{args.epochs}"):
+        for inputs, targets in tqdm(train_loader, desc=f"{strategy_name} Strategy Epoch {epoch+1}/{args.epochs}"):
             loss, repeats = strategy.train_batch(inputs, targets)
             epoch_repeats += repeats
 
@@ -88,7 +86,7 @@ def run_tests(args):
     os.makedirs(args.save_dir, exist_ok=True)
 
     # 加载数据
-    print('加载数据集...')
+    print('Loading dataset...')
     data_loader = HousingDataLoader(dataset_name=args.dataset, batch_size=args.batch_size)
     train_loader = data_loader.get_train_loader()
     test_loader = data_loader.get_test_loader()
@@ -103,11 +101,11 @@ def run_tests(args):
     strategies = ['baseline', 'abr', 'learnable', 'window']
 
     for strategy_name in strategies:
-        print(f"\n测试 {strategy_name} 策略...")
+        print(f"\nTesting {strategy_name} strategy...")
         strategy_results = []
 
         for run in range(1, args.num_runs + 1):
-            print(f"  运行 {run}/{args.num_runs}")
+            print(f"  Run {run}/{args.num_runs}")
 
             # 创建新模型
             model = MLP(input_dim, args.hidden_dim)
@@ -143,10 +141,10 @@ def run_tests(args):
         }
 
         all_results.append(avg_result)
-        print(f"  平均训练时间: {avg_result['avg_total_time']:.2f} ± {avg_result['std_total_time']:.2f}秒")
-        print(f"  平均重复次数/批次: {avg_result['avg_repeats_per_batch']:.2f}")
-        print(f"  平均测试RMSE: {avg_result['avg_final_test_rmse']:.4f} ± {avg_result['std_final_test_rmse']:.4f}")
-        print(f"  平均测试MAE: {avg_result['avg_final_test_mae']:.4f} ± {avg_result['std_final_test_mae']:.4f}")
+        print(f"  Average training time: {avg_result['avg_total_time']:.2f} ± {avg_result['std_total_time']:.2f}s")
+        print(f"  Average repeats per batch: {avg_result['avg_repeats_per_batch']:.2f}")
+        print(f"  Average test RMSE: {avg_result['avg_final_test_rmse']:.4f} ± {avg_result['std_final_test_rmse']:.4f}")
+        print(f"  Average test MAE: {avg_result['avg_final_test_mae']:.4f} ± {avg_result['std_final_test_mae']:.4f}")
 
         # 保存指标历史
         for i, result in enumerate(strategy_results):
@@ -155,7 +153,7 @@ def run_tests(args):
     # 保存所有结果到CSV
     df = pd.DataFrame(all_results)
     df.to_csv(os.path.join(args.save_dir, 'performance_comparison.csv'), index=False, encoding='utf-8-sig')
-    print(f"\n结果已保存到 {args.save_dir}/performance_comparison.csv")
+    print(f"\nResults saved to {args.save_dir}/performance_comparison.csv")
 
     # 可视化比较结果
     visualize_results(all_results, args.save_dir)
@@ -163,7 +161,7 @@ def run_tests(args):
 
 def visualize_results(results, save_dir):
     """
-    可视化不同策略的性能比较
+    Visualize performance comparison of different strategies
     """
     # 提取数据
     strategies = [r['strategy'] for r in results]
@@ -175,36 +173,36 @@ def visualize_results(results, save_dir):
     # 绘制训练时间比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_total_time, yerr=[r['std_total_time'] for r in results], capsize=5)
-    plt.xlabel('训练策略')
-    plt.ylabel('平均训练时间 (秒)')
-    plt.title('不同策略的训练时间比较')
+    plt.xlabel('Training Strategy')
+    plt.ylabel('Average Training Time (s)')
+    plt.title('Training Time Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'training_time_comparison.png'))
 
     # 绘制RMSE比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_final_test_rmse, yerr=[r['std_final_test_rmse'] for r in results], capsize=5)
     plt.xlabel('训练策略')
-    plt.ylabel('平均测试RMSE')
-    plt.title('不同策略的测试RMSE比较')
+    plt.ylabel('Average Test RMSE')
+    plt.title('Test RMSE Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'rmse_comparison.png'))
 
     # 绘制MAE比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_final_test_mae, yerr=[r['std_final_test_mae'] for r in results], capsize=5)
     plt.xlabel('训练策略')
-    plt.ylabel('平均测试MAE')
-    plt.title('不同策略的测试MAE比较')
+    plt.ylabel('Average Test MAE')
+    plt.title('Test MAE Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'mae_comparison.png'))
 
     # 绘制重复次数比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_repeats)
     plt.xlabel('训练策略')
-    plt.ylabel('平均重复次数/批次')
-    plt.title('不同策略的重复训练次数比较')
+    plt.ylabel('Average Repeats per Batch')
+    plt.title('Repetition Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'repeats_comparison.png'))
 
-    print(f"可视化图表已保存到 {save_dir} 目录")
+    print(f"Visualization charts saved to {save_dir} directory")
 
 
 if __name__ == '__main__':
