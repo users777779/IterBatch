@@ -181,7 +181,7 @@ def visualize_results(results, save_dir):
     # 绘制RMSE比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_final_test_rmse, yerr=[r['std_final_test_rmse'] for r in results], capsize=5)
-    plt.xlabel('训练策略')
+    plt.xlabel('Training Strategy')
     plt.ylabel('Average Test RMSE')
     plt.title('Test RMSE Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'rmse_comparison.png'))
@@ -189,7 +189,7 @@ def visualize_results(results, save_dir):
     # 绘制MAE比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_final_test_mae, yerr=[r['std_final_test_mae'] for r in results], capsize=5)
-    plt.xlabel('训练策略')
+    plt.xlabel('Training Strategy')
     plt.ylabel('Average Test MAE')
     plt.title('Test MAE Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'mae_comparison.png'))
@@ -197,7 +197,7 @@ def visualize_results(results, save_dir):
     # 绘制重复次数比较
     plt.figure(figsize=(10, 6))
     plt.bar(strategies, avg_repeats)
-    plt.xlabel('训练策略')
+    plt.xlabel('Training Strategy')
     plt.ylabel('Average Repeats per Batch')
     plt.title('Repetition Comparison of Different Strategies')
     plt.savefig(os.path.join(save_dir, 'repeats_comparison.png'))
