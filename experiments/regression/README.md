@@ -71,12 +71,12 @@ regression/
 ```bash
 cd experiments/regression
 conda activate abr-regression
-python train.py --dataset california_housing --strategy abr
+python train.py --dataset california --strategy abr
 ```
 
 ### 多策略对比训练
 ```bash
-python train_comparison.py --dataset california_housing --epochs 3 --batch_size 5
+python train_comparison.py --dataset california --epochs 3 --batch_size 5
 ```
 
 ### 性能测试
