@@ -98,6 +98,30 @@ class BaseTrainingStrategy:
         self.metrics_history['test_rmse'].append(test_rmse)
         self.metrics_history['test_mae'].append(test_mae)
 
+    def save_metrics_with_accuracy(self, epoch, train_loss, train_rmse, train_mae, train_accuracy, test_loss, test_rmse, test_mae, test_accuracy):
+        """保存训练和测试指标（包含accuracy）
+
+        Args:
+            epoch: 当前 epoch 数
+            train_loss: 训练损失
+            train_rmse: 训练 RMSE
+            train_mae: 训练 MAE
+            train_accuracy: 训练 accuracy
+            test_loss: 测试损失
+            test_rmse: 测试 RMSE
+            test_mae: 测试 MAE
+            test_accuracy: 测试 accuracy
+        """
+        self.metrics_history['epoch'].append(epoch)
+        self.metrics_history['train_loss'].append(train_loss)
+        self.metrics_history['train_rmse'].append(train_rmse)
+        self.metrics_history['train_mae'].append(train_mae)
+        self.metrics_history['train_accuracy'].append(train_accuracy)
+        self.metrics_history['test_loss'].append(test_loss)
+        self.metrics_history['test_rmse'].append(test_rmse)
+        self.metrics_history['test_mae'].append(test_mae)
+        self.metrics_history['test_accuracy'].append(test_accuracy)
+
 
 class BaselineStrategy(BaseTrainingStrategy):
     """基线策略：每个批次只训练一次
@@ -131,7 +155,7 @@ class ABRStrategy(BaseTrainingStrategy):
     动态决定该批次的重复训练次数。损失值高的难训练批次会被训练更多次，
     损失值低的易训练批次则训练次数较少。
     """
-    def __init__(self, model, criterion, optimizer, loss_threshold=0.5, max_repeats=5):
+    def __init__(self, model, criterion, optimizer, loss_threshold=0.3, max_repeats=5):
         """初始化ABR策略
 
         Args:
@@ -225,14 +249,22 @@ class LearnableSchedulingStrategy(BaseTrainingStrategy):
         self.model.train()  # 设置主模型为训练模式
         self.scheduler_model.train()  # 设置调度模型为训练模式
 
-        # 初始前向传播，获取损失
+        # 初始前向传播，获取损失和输出
         initial_outputs = self.model(inputs)  # 主模型前向传播
         initial_loss = self.criterion(initial_outputs, targets)  # 计算初始损失
+        
+        # 计算初始accuracy (在回归任务中，我们可以使用1/RMSE作为accuracy的近似)
+        with torch.no_grad():
+            initial_rmse = torch.sqrt(initial_loss)
+            # 避免除零错误，添加一个小的epsilon
+            epsilon = 1e-8
+            initial_accuracy = 1.0 / (initial_rmse + epsilon)
 
         # 使用调度模型预测重复次数
         with torch.no_grad():
-            # 调度模型根据初始损失预测重复次数
-            repeat_count = self.scheduler_model(initial_loss.unsqueeze(0)).item()
+            # 调度模型根据初始损失和accuracy预测重复次数
+            scheduler_input = torch.tensor([[initial_loss.item(), initial_accuracy.item()]], dtype=torch.float32)
+            repeat_count = self.scheduler_model(scheduler_input).item()
             # 限制重复次数在1-5次之间，并四舍五入
             repeat_count = max(1, min(int(repeat_count + 0.5), 5))
 
@@ -252,6 +284,7 @@ class LearnableSchedulingStrategy(BaseTrainingStrategy):
         # 记录该批次的训练历史
         self.batch_history.append({
             'initial_loss': initial_loss.item(),
+            'initial_accuracy': initial_accuracy.item(),
             'predicted_repeats': repeat_count,
             'loss_history': batch_history
         })
@@ -266,7 +299,7 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
     并根据损失的变化趋势来调整当前批次的重复训练次数。
     如果损失呈上升趋势且当前损失高于阈值，则增加重复训练次数。
     """
-    def __init__(self, model, criterion, optimizer, window_size=5, loss_threshold=0.5, max_repeats=1):
+    def __init__(self, model, criterion, optimizer, window_size=5, loss_threshold=0.3, max_repeats=1):
         """初始化滑动窗口策略
 
         Args:
@@ -308,11 +341,39 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
             recent_losses = list(self.loss_window)
             # 使用线性回归计算趋势（斜率）
             trend = np.polyfit(range(len(recent_losses)), recent_losses, 1)[0]
-
-            # 如果损失呈上升趋势且当前损失高于阈值，则增加重复次数
-            if trend > 0 and initial_loss > self.loss_threshold:
-                # 最多重复max_repeats次（总共训练max_repeats+1次）
-                repeat_count = min(1 + self.max_repeats, 5)  # 限制最大训练次数为5
+            
+            # 计算窗口内损失的标准差，衡量波动性
+            std_dev = np.std(recent_losses)
+            
+            # 根据不同趋势调整重复次数
+            # 考虑损失值、趋势和波动性来综合决定重复次数
+            if trend > 0.01:  # 损失显著上升趋势
+                if initial_loss > self.loss_threshold:
+                    # 损失上升且当前损失高，增加重复次数
+                    repeat_count = min(1 + self.max_repeats, 5)  # 限制最大训练次数为5
+                else:
+                    # 损失上升但当前损失不高，适度增加重复次数
+                    repeat_count = min(2, 5)
+            elif trend < -0.01:  # 损失显著下降趋势
+                if initial_loss > self.loss_threshold:
+                    # 损失下降但当前损失高，适度增加重复次数
+                    repeat_count = min(2, 5)
+                else:
+                    # 损失下降且当前损失不高，减少重复次数
+                    repeat_count = 1
+            else:  # 趋势不明显
+                if std_dev > 0.1:  # 波动较大
+                    # 波动较大时，适度增加重复次数以稳定训练
+                    if initial_loss > self.loss_threshold:
+                        repeat_count = min(2 + self.max_repeats, 5)
+                    else:
+                        repeat_count = min(2, 5)
+                else:
+                    # 趋势不明显且波动小，根据损失值决定重复次数
+                    if initial_loss > self.loss_threshold:
+                        repeat_count = min(1 + self.max_repeats, 5)
+                    else:
+                        repeat_count = 1
 
         # 重复训练
         batch_history = []

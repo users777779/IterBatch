@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from sklearn.datasets import fetch_california_housing, load_boston
+from sklearn.datasets import fetch_california_housing
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 
@@ -17,13 +17,6 @@ class HousingDataLoader:
         """加载并预处理数据集"""
         if self.dataset_name.lower() == 'california':
             dataset = fetch_california_housing()
-        elif self.dataset_name.lower() == 'boston':
-            try:
-                dataset = load_boston()
-            except ImportError:
-                # 波士顿房价数据集在scikit-learn 1.0版本后被移除
-                print("波士顿房价数据集已从scikit-learn中移除，使用加州房价数据集替代")
-                dataset = fetch_california_housing()
         else:
             raise ValueError("不支持的数据集: {}".format(self.dataset_name))
 
