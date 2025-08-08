@@ -1,0 +1,26 @@
+Experiment started at 2025-08-07 09:28:18
+Experiment directory: experiments/regression/results_comparison/experiment_20250807_092818
+Configuration:
+  dataset: california
+  batch_size: 5
+  epochs: 3
+  lr: 0.001
+  hidden_dim: 64
+  loss_threshold: 0.5
+  max_repeats: 1
+  window_size: 5
+  save_dir: experiments/regression/results_comparison
+  early_stopping: True
+
+Dataset loaded at 2025-08-07 09:28:18
+Dataset: california
+Training samples: 16512
+Test samples: 4128
+Number of training batches: 3303
+Number of test batches: 826
+
+Epoch 1, Batch 0
+Input shape: torch.Size([5, 8])
+Target shape: torch.Size([5, 1])
+Target min: 0.6460000276565552, max: 1.6959999799728394, mean: 1.16920006275177
+

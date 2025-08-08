@@ -1,106 +1,96 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, LlamaTokenizer
-from peft import get_peft_model, LoraConfig, TaskType
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model
 
 
 class LLaMAWithLoRA(nn.Module):
-    """LLaMA模型与LoRA适配器结合的文本生成模型"""
-    def __init__(self, model_name, lora_rank=8, lora_alpha=32, lora_dropout=0.1):
-        """初始化LLaMA+LoRA模型
+    """LLaMA + LoRA 封装
+    - 负责加载分词器与模型
+    - 应用LoRA到LLaMA的注意力与MLP投影层
+    - forward 兼容 HF CausalLM (input_ids, attention_mask, labels)
+    """
+    def __init__(self, model_name: str, lora_rank: int = 8, lora_alpha: int = 32, lora_dropout: float = 0.1):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+        # LLaMA通常无pad_token，设置为eos保持因果LM一致
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = 'left'  # 生成式任务常用left padding
 
-        Args:
-            model_name: 预训练LLaMA模型的名称或路径
-            lora_rank: LoRA矩阵的秩
-            lora_alpha: LoRA缩放因子
-            lora_dropout: LoRA层的dropout率
-        """
-        super(LLaMAWithLoRA, self).__init__()
-        
-        # 加载预训练的LLaMA模型，启用低CPU内存使用
-        self.llama_model = LlamaForCausalLM.from_pretrained(
-            model_name,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float16  # 使用半精度减少内存占用
-        )
-        
-        # 配置LoRA参数
-        peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            inference_mode=False,
+        # 加载基础因果语言模型（优先8-bit量化，其次FP16 + 自动设备映射）
+        use_cuda = torch.cuda.is_available()
+        device_map = 'auto' if use_cuda else None
+        if use_cuda:
+            # 使用8-bit量化 + FP32 CPU offload，兼顾显存与可加载性
+            quant_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_enable_fp32_cpu_offload=True,
+            )
+            self.backbone = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map=device_map,
+                quantization_config=quant_config,
+            )
+        else:
+            dtype = torch.float32
+            self.backbone = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map=device_map,
+                torch_dtype=dtype,
+            )
+
+        self.backbone.resize_token_embeddings(len(self.tokenizer))
+        # 训练时禁用use_cache
+        if hasattr(self.backbone, 'config'):
+            self.backbone.config.use_cache = False
+
+        # LoRA 配置：覆盖注意力和MLP常见投影层
+        target_modules = [
+            'q_proj', 'k_proj', 'v_proj', 'o_proj',
+            'gate_proj', 'up_proj', 'down_proj'
+        ]
+        lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,
+            target_modules=target_modules,
             lora_dropout=lora_dropout,
-            target_modules=["q_proj", "v_proj"]  # 只对注意力机制中的q和v矩阵应用LoRA
+            bias='none',
+            task_type='CAUSAL_LM'
         )
-        
-        # 将LoRA适配器添加到模型中
-        self.model = get_peft_model(self.llama_model, peft_config)
-        
-        # 冻结原始模型参数，只训练LoRA参数
-        for param in self.llama_model.parameters():
-            param.requires_grad = False
-    
-    def forward(self, input_ids, attention_mask=None, labels=None):
-        """前向传播
+        self.backbone = get_peft_model(self.backbone, lora_config)
 
-        Args:
-            input_ids: 输入token的ID
-            attention_mask: 注意力掩码
-            labels: 标签，用于计算损失
+        # 显式冻结非LoRA参数，仅训练LoRA权重
+        for name, param in self.backbone.named_parameters():
+            if 'lora_' in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
-        Returns:
-            模型输出，包括loss（如果提供了labels）和logits
-        """
-        return self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    
-    def generate(self, input_ids, attention_mask=None, max_length=100, num_beams=1, do_sample=False, temperature=1.0):
-        """生成文本
+    def forward(self, input_ids=None, attention_mask=None, labels=None):
+        return self.backbone(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-        Args:
-            input_ids: 输入token的ID
-            attention_mask: 注意力掩码
-            max_length: 生成文本的最大长度
-            num_beams: Beam搜索的beam数量
-            do_sample: 是否使用采样
-            temperature: 采样温度
+    def get_tokenizer(self):
+        return self.tokenizer
 
-        Returns:
-            生成的token ID序列
-        """
-        return self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=max_length,
-            num_beams=num_beams,
-            do_sample=do_sample,
-            temperature=temperature
-        )
-
-    def clone(self):
-        """创建模型的深拷贝"""
-        # 注意：由于模型包含预训练权重，直接克隆可能不适用
-        # 这里提供一个占位符实现
-        raise NotImplementedError("模型克隆功能需要根据具体需求实现")
+    def generate(self, *args, **kwargs):
+        return self.backbone.generate(*args, **kwargs)
 
 
 class SchedulerLLaMA(nn.Module):
-    """调度模型，接收loss和perplexity作为输入，预测重复训练次数"""
-    def __init__(self, hidden_dim, output_dim=1):
-        super(SchedulerLLaMA, self).__init__()
-        # 输入维度为2 (loss, perplexity)
-        self.fc1 = nn.Linear(2, hidden_dim)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
-        self.dropout = nn.Dropout(0.2)
+    """简单的调度器：输入(batch初始loss, perplexity)，输出建议的重复训练次数(实数)"""
+    def __init__(self, hidden_dim: int = 32, output_dim: int = 1):
+        super().__init__()
+        # 输入维度=2: [loss, ppl]
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim)
+        )
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc3(x)
-        return x
+        return self.net(x)
