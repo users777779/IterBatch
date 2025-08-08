@@ -1,21 +1,23 @@
 name: abr-text-generation
 channels:
+  - nvidia
   - pytorch
   - conda-forge
   - defaults
 dependencies:
-  - python=3.9
-  - pytorch=1.12.1
-  - cudatoolkit=11.6
-  - numpy=1.23.3
-  - pip=22.2.2
+  - python=3.10
+  - pytorch=2.5.*
+  - pytorch-cuda=12.4  # 需与驱动匹配
+  - numpy>=1.26
+  - cudnn
+  - pip>=23
   - pip:
-    - transformers==4.30.0
-    - datasets==2.10.0
-    - peft==0.3.0
-    - accelerate==0.14.0
-    - bitsandbytes==0.35.0
-    - pyarrow==6.0.1
-    - tensorboard
-    - sentencepiece
-    - fsspec==2022.11.0
+      - transformers==4.41.2
+      - datasets==2.20.0
+      - peft==0.11.1
+      - accelerate==0.33.0
+      - bitsandbytes==0.43.1
+      - sentencepiece
+      - tensorboard
+      - pyarrow>=14
+      - fsspec
