@@ -1,3 +1,14 @@
+"""模型定义
+
+包含：
+- `MLP`：用于回归任务的多层感知器（两层隐藏层 + Dropout）
+- `SchedulerMLP`：用于 Learnable 策略的调度网络（输入为 [loss, accuracy]）
+
+设计要点：
+- 适度的 Dropout(0.2) 用于抑制过拟合
+- 提供 `clone()` 方便复制结构参数（如需对比备份）
+"""
+
 import torch
 import torch.nn as nn
 

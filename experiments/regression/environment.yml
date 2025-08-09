@@ -1,18 +1,16 @@
 name: abr-regression
 channels:
   - pytorch
-  - conda-forge
   - defaults
+  - conda-forge
 dependencies:
   - python=3.9
-  - pytorch=1.12.1
-  - torchvision=0.13.1
-  - scikit-learn=1.1.2
-  - numpy=1.23.3
-  - matplotlib=3.6.0
-  - pip=22.2.2
-  - pandas=2.3.1
-  - tqdm=4.67.1
+  - pytorch=1.12.*
+  - torchvision=0.13.*
+  - scikit-learn>=1.1,<1.3
+  - numpy>=1.23,<1.26
+  - matplotlib>=3.6,<3.8
+  - pip
+  - tqdm
   - pip:
-    # 如果有需要通过pip安装的包，可以在这里添加
-    - tensorboard==2.12.0
+      - tensorboard>=2.12,<2.16
