@@ -1,43 +1,103 @@
-# IterBatch 实验说明
+# IterBatch 图像分类实验
 
-本目录下的 `main.py` 实现了三种批训练策略的对比实验：
+本实验实现了三种批训练策略的对比，探索自适应批重复（ABR）技术在CIFAR10图像分类中的效果。
 
-## 实验方案
-1. **Baseline**：每个 batch 只训练一次，记录每轮平均 loss 和 accuracy。
-2. **Loss-only 决策网络**：每个 batch 用当前 loss 作为输入，MLP 判决是否重复训练该 batch（重复一次）。
-3. **Context 决策网络**：每个 batch 用当前 loss 和前 10 步 loss 均值作为输入，MLP 判决是否重复训练该 batch。
+## 实验策略
 
-三种实验均使用相同的模型初始参数，保证公平性。每种实验有独立优化器。
+1. **Baseline**：标准训练，每个batch训练一次
+2. **Loss-only ABR**：基于当前loss值决策是否重复训练
+3. **Context ABR**：基于当前loss和历史loss均值决策
 
-## 主要参数
-- 训练轮数（epoch）：7
-- 批大小（batch_size）：64
-- 主模型学习率：0.01
-- 决策网络学习率：1e-4
-- 滑动窗口大小（context）：10
+## 核心代码
 
-## 可视化输出
-- **TensorBoard**：所有实验的 loss/accuracy 曲线均写入 `result/runs/iterbatch_exp` 日志目录。
-- **PNG 图表**：训练结束后自动生成 `result/iterbatch_exp_results.png`，对比三组实验的 loss 和 accuracy 曲线。
+### 决策网络
+```python
+class DecisionMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(hidden_dim//2, 2)
+        )
+    
+    def forward(self, x):
+        return self.net(x)  # 返回logits
+```
+
+### ABR决策逻辑
+```python
+# 决策网络输出概率分布
+action_logits = decider_network(decider_input)
+action_probs = torch.softmax(action_logits, dim=-1)
+
+# 根据概率分布随机采样决策
+m = torch.distributions.Categorical(action_probs)
+action = m.sample()  # 0: 不重复, 1: 重复
+
+# 监督学习标签：使用采样的动作作为标签
+label = action  # 决策网络学习自己做出的决策
+```
+
+## 关键参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| epochs | 20 | 训练轮数 |
+| batch_size | 32 | 批大小 |
+| lr | 0.001 | 主模型学习率 |
+| scheduler_lr | 1e-4 | 决策网络学习率 |
+| window_size | 10 | 历史loss窗口大小 |
+| threshold | 无 | 使用采样动作作为标签 |
+
+## 数据集和模型
+
+- **数据集**：CIFAR10（10类，32×32×3）
+- **主模型**：DeepCNN（3个卷积块 + 全连接层）
+- **决策网络**：DecisionMLP（2层隐藏层）
 
 ## 运行方法
-1. 安装依赖（建议 Python 3.8+，需提前安装好 torch、torchvision、numpy、matplotlib、tensorboard）：
-   ```bash
-   pip install torch torchvision numpy==1.26.4 matplotlib tensorboard
-   ```
-2. 运行实验脚本：
-   ```bash
-   python main.py
-   ```
-3. 查看 TensorBoard 曲线：
-   ```bash
-   tensorboard --logdir=./result/runs
-   ```
-   浏览器访问 http://localhost:6006
-4. 查看 PNG 图表：
-   训练结束后会在 `result/` 目录生成 `iterbatch_exp_results.png`，可直接打开查看。
 
-## 备注
-- 若遇到 numpy 2.x 兼容性问题，请降级 numpy 至 1.26.4。
-- MNIST 数据集会自动下载到 `data/` 目录。
-- 如需自定义参数，可直接修改脚本内的超参数设置。
+```bash
+# 安装依赖
+pip install torch torchvision numpy==1.26.4 matplotlib tensorboard
+
+# 运行实验
+cd experiments/image_classification
+python main.py
+
+# 查看结果
+tensorboard --logdir=experiments/image_classification/result/runs
+# 访问 http://localhost:6006
+```
+
+## 输出结果
+
+- **TensorBoard**：6个独立曲线（每个实验的Accuracy和Loss）
+- **PNG图表**：`result/iterbatch_exp_results.png`
+- **数据路径**：`experiments/image_classification/data`
+
+## 训练流程
+
+### 监督学习ABR流程
+1. **初始训练**：当前batch训练一次，得到loss
+2. **决策网络**：loss输入决策网络，得到概率分布，采样得到动作
+3. **决策网络学习**：使用采样的动作作为标签训练决策网络
+4. **重复训练**：如果动作=1，重新训练当前batch（不更新决策网络）
+
+### 实验特点
+
+- ✅ 公平比较：相同初始权重
+- ✅ 独立优化器：避免相互影响
+- ✅ 自动清理：每次运行清理历史日志
+- ✅ 详细记录：完整训练过程可视化
+- ✅ 正确逻辑：决策网络学习自己的决策，重复训练不重复决策
+
+## 故障排除
+
+- **numpy版本冲突**：使用 `numpy==1.26.4`
+- **内存不足**：减小 `batch_size`
+- **训练缓慢**：使用GPU或减少epochs
+- **TensorBoard无显示**：检查日志目录路径
