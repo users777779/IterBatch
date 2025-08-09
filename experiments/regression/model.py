@@ -39,11 +39,36 @@ class MLP(nn.Module):
 
 
 class SchedulerMLP(nn.Module):
-    """调度模型，接收loss和accuracy作为输入"""
+    """调度模型，接收 [loss, r2] 作为输入"""
     def __init__(self, hidden_dim, output_dim=1):
         super(SchedulerMLP, self).__init__()
-        # 输入维度为2 (loss, accuracy)
+        # 输入维度为2 (loss, r2)
         self.fc1 = nn.Linear(2, hidden_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(0.2)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc3(x)
+        return x
+
+
+class WindowPolicyMLP(nn.Module):
+    """滑动窗口策略的可学习决策网络
+
+    输入特征建议： [z_loss, norm_trend, std_dev, mean_loss, initial_loss, delta_cur_mean]
+    输出： 预测附加重复次数（实数，训练时会回归到整数目标）
+    """
+    def __init__(self, input_dim: int = 6, hidden_dim: int = 32, output_dim: int = 1):
+        super(WindowPolicyMLP, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, output_dim)
