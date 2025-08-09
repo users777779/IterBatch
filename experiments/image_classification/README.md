@@ -55,6 +55,8 @@ label = action  # 决策网络学习自己做出的决策
 ## 数据集和模型
 
 - **数据集**：CIFAR10（10类，32×32×3）
+运行代码时会自动下载CIFAR10数据集到 `experiments/image_classification/data/` 目录。
+数据集文件较大（约163MB），首次运行可能需要一些时间下载。
 - **主模型**：DeepCNN（3个卷积块 + 全连接层）
 - **决策网络**：DecisionMLP（2层隐藏层）
 
