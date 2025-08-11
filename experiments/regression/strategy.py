@@ -1,10 +1,11 @@
-"""训练策略实现
+"""训练策略实现（解耦版）
 
-包含四种策略，均继承自 `BaseTrainingStrategy`：
-- Baseline：每批次训练一次
-- ABR：Adaptive Batch Repetition，根据初始 loss 自适应重复次数
-- Learnable：可学习调度策略，在线用 ABR 的重复数作伪标签训练调度器
-- SlidingWindow：根据最近窗口内损失趋势与波动度设定重复次数
+包含五种互相低耦合的策略，均继承自 `BaseTrainingStrategy`：
+- Baseline：每批次训练一次（对照）
+- ABR（算数）：根据初始 loss 自适应重复次数
+- Learnable（学习ABR）：独立的调度网络，在线学习重复次数
+- SlidingWindow（算数）：根据窗口内损失的趋势与波动度设定重复次数
+- LearnableWindow（学习滑窗）：独立的窗口决策网络，仅用启发式作为监督信号（不参与推理）
 
 公共能力：
 - `evaluate`：在给定数据集上计算平均 Loss/RMSE/MAE
@@ -203,8 +204,10 @@ class ABRStrategy(BaseTrainingStrategy):
         self.model.train()  # 设置模型为训练模式
         total_loss = 0
         repeat_count = 0
-        initial_outputs = self.model(inputs)  # 初始前向传播
-        initial_loss = self.criterion(initial_outputs, targets).item()  # 计算初始损失
+        # 初始损失用于决策，不参与反传，避免构建无用计算图
+        with torch.no_grad():
+            initial_outputs = self.model(inputs)
+            initial_loss = float(self.criterion(initial_outputs, targets).item())
 
         # 根据初始损失决定重复次数
         if initial_loss > self.loss_threshold:
@@ -227,7 +230,7 @@ class ABRStrategy(BaseTrainingStrategy):
         avg_loss = total_loss / repeat_count  # 计算平均损失
         # 记录该批次的训练历史
         self.batch_history.append({
-            'initial_loss': initial_loss,
+            'initial_loss': float(initial_loss),
             'repeat_count': repeat_count,
             'loss_history': batch_history
         })
@@ -306,12 +309,10 @@ class LearnableSchedulingStrategy(BaseTrainingStrategy):
         self.model.train()  # 设置主模型为训练模式
         self.scheduler_model.train()  # 设置调度模型为训练模式
 
-        # 初始前向传播，获取损失
-        initial_outputs = self.model(inputs)
-        initial_loss = self.criterion(initial_outputs, targets)
-
-        # 初始 R^2（供调度器输入使用，batch 近似）
+        # 初始前向传播，获取损失与R2（用于调度器输入），不参与反传
         with torch.no_grad():
+            initial_outputs = self.model(inputs)
+            initial_loss = self.criterion(initial_outputs, targets)
             sse = torch.sum((initial_outputs - targets) ** 2)
             mean_target = torch.mean(targets)
             sst = torch.sum((targets - mean_target) ** 2) + 1e-8
@@ -415,7 +416,7 @@ class LearnableSchedulingStrategy(BaseTrainingStrategy):
 
 
 class SlidingWindowStrategy(BaseTrainingStrategy):
-    """滑动窗口策略：根据最近批次的损失趋势与波动度调整重复训练次数
+    """滑动窗口策略（算数/启发式）：仅使用启发式决策，不包含可学习组件。
 
     原理（规范化版）：
     - 趋势：trend = (last - first) / (n - 1)
@@ -436,13 +437,6 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
         vol_threshold=0.1,
         window_min_size=3,
         volatility_mode: str = 'suppress',  # 'suppress' 或 'encourage'
-        # 可选：引入可学习的策略（小型决策网络），当提供时将覆盖启发式 additional_repeats
-        policy_model: nn.Module = None,
-        policy_optimizer: optim.Optimizer = None,
-        policy_warmup_epochs: int = 0,
-        policy_supervise_weight: float = 1.0,
-        policy_main_weight: float = 1.0,
-        policy_epsilon: float = 0.0,
         # 风险评分权重（便于实验可控）
         weight_trend: float = 1.0,
         weight_zloss: float = 0.5,
@@ -478,14 +472,6 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
         self.loss_window = deque(maxlen=window_size)
         self.batch_history = []
         self.volatility_mode = volatility_mode
-
-        # Learnable policy 相关
-        self.policy_model = policy_model
-        self.policy_optimizer = policy_optimizer
-        self.policy_warmup_epochs = int(policy_warmup_epochs)
-        self.policy_supervise_weight = float(policy_supervise_weight)
-        self.policy_main_weight = float(policy_main_weight)
-        self.policy_epsilon = float(policy_epsilon)
         # 风险权重
         self.weight_trend = float(weight_trend)
         self.weight_zloss = float(weight_zloss)
@@ -513,9 +499,10 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
         self.model.train()
         total_loss = 0.0
 
-        # 初始前向传播，获取当前批次初始损失
-        initial_outputs = self.model(inputs)
-        initial_loss = float(self.criterion(initial_outputs, targets).item())
+        # 初始前向传播，获取当前批次初始损失（用于决策），不参与反传
+        with torch.no_grad():
+            initial_outputs = self.model(inputs)
+            initial_loss = float(self.criterion(initial_outputs, targets).item())
 
         # 默认仅一次（无附加重复）
         additional_repeats = 0
@@ -601,31 +588,8 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
             }
 
         heuristic_additional = int(additional_repeats)
-
-        # 若提供可学习策略，则用决策网络覆盖 heuristic additional repeats
-        used_policy = False
-        policy_loss_value = None
-        raw_pred_additional = None
-        if self.policy_model is not None and self.policy_optimizer is not None:
-            used_policy = True
-            # 特征组：z_loss, norm_trend, std_dev, mean_loss, initial_loss, delta_cur_mean
-            delta_cur_mean = initial_loss - diagnostics['mean_loss']
-            policy_feat = torch.tensor([[float(z_loss) if len(self.loss_window) >= self.window_min_size else 0.0,
-                                         float(norm_trend) if len(self.loss_window) >= self.window_min_size else 0.0,
-                                         float(diagnostics['std_dev']),
-                                         float(diagnostics['mean_loss']),
-                                         float(initial_loss),
-                                         float(delta_cur_mean)]], dtype=torch.float32)
-            policy_out = self.policy_model(policy_feat)  # [1,1]
-            raw_pred_additional = float(policy_out.squeeze(0).squeeze(0).detach().cpu().item())
-
-            # ε-greedy 探索：在 [0, max_repeats] 上随机
-            if np.random.rand() < self.policy_epsilon:
-                additional_repeats = np.random.randint(0, self.max_repeats + 1)
-            else:
-                additional_repeats = int(np.clip(round(raw_pred_additional), 0, self.max_repeats))
-        else:
-            additional_repeats = heuristic_additional
+        # 纯启发式：不包含任何可学习覆盖
+        additional_repeats = heuristic_additional
 
         # 总重复次数：1 + 附加重复；并做全局硬上限 5
         repeat_count = 1 + additional_repeats
@@ -648,45 +612,11 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
 
         avg_loss = total_loss / repeat_count
 
-        # 若使用可学习策略，则基于启发式与主反馈进行监督（两阶段）
-        if used_policy:
-            # 计算主反馈目标：在已执行的重复中，选择“单位计算改进”最优的 j
-            with torch.no_grad():
-                if len(batch_history) > 0:
-                    improvements = []
-                    for j in range(1, len(batch_history) + 1):
-                        loss_j = batch_history[j - 1]
-                        improvements.append(((initial_loss - loss_j) / j))
-                    best_j = int(np.argmax(improvements) + 1)
-                else:
-                    best_j = 1
-
-            warmup_target = torch.tensor(float(heuristic_additional), dtype=torch.float32)
-            main_target = torch.tensor(float(max(0, best_j - 1)), dtype=torch.float32)
-
-            self.policy_optimizer.zero_grad()
-            # 重新前向（保留计算图）
-            policy_out2 = self.policy_model(policy_feat).squeeze(0).squeeze(0)
-            loss_terms = []
-            if self.current_epoch < self.policy_warmup_epochs and self.policy_supervise_weight > 0:
-                loss_terms.append(self.policy_supervise_weight * nn.MSELoss()(policy_out2, warmup_target))
-                policy_phase = 'warmup_heuristic'
-            else:
-                if self.policy_main_weight > 0:
-                    loss_terms.append(self.policy_main_weight * nn.MSELoss()(policy_out2, main_target))
-                if self.policy_supervise_weight > 0:
-                    loss_terms.append(self.policy_supervise_weight * nn.MSELoss()(policy_out2, warmup_target))
-                policy_phase = 'main_feedback'
-            if len(loss_terms) == 0:
-                policy_loss = torch.tensor(0.0)
-            else:
-                policy_loss = torch.stack([lt if isinstance(lt, torch.Tensor) else torch.tensor(lt) for lt in loss_terms]).sum()
-            policy_loss.backward()
-            self.policy_optimizer.step()
-            policy_loss_value = float(policy_loss.detach().cpu().item())
-        else:
-            best_j = None
-            policy_phase = None
+        # 本策略无可学习组件
+        best_j = None
+        policy_phase = None
+        policy_loss_value = None
+        raw_pred_additional = None
 
         # 记录本批次历史（包含诊断信息）
         record = {
@@ -698,31 +628,20 @@ class SlidingWindowStrategy(BaseTrainingStrategy):
         }
         record.update(diagnostics)
         # 扩展记录（可学习策略相关）
-        if used_policy:
-            record.update({
-                'used_policy': True,
-                'policy_loss': float(policy_loss_value) if policy_loss_value is not None else None,
-                'raw_pred_additional': float(raw_pred_additional) if raw_pred_additional is not None else None,
-                'policy_phase': policy_phase,
-                'best_j_from_feedback': int(best_j) if best_j is not None else None,
-            })
-        else:
-            record['used_policy'] = False
+        record['used_policy'] = False
         self.batch_history.append(record)
 
         return avg_loss, repeat_count
 
 
-class LearnableWindowStrategy(SlidingWindowStrategy):
-    """可学习滑动窗口策略（独立策略）
+class LearnableWindowStrategy(BaseTrainingStrategy):
+    """可学习滑动窗口策略：仅由决策网络进行推理，启发式仅用于监督信号。
 
-    在 `SlidingWindowStrategy` 启发式规则基础上，引入一个决策网络预测附加重复数，
-    并使用两阶段训练：
-    - 预热：以启发式 additional_repeats 作为监督
-    - 主阶段：以主模型反馈的 best_j-1 作为监督（单位计算改进最优）
-
-    说明：父类已实现完整的可学习路径（当 policy_model/optimizer 提供时），此处仅强制要求提供
-    决策网络，形成独立策略，便于在 CLI/README 中清晰对齐“五策略”框架。
+    - 推理：使用策略网络对附加重复数进行回归，应用 ε-greedy 与裁剪到 [0, max_repeats]
+    - 训练：两阶段
+        - 预热：用启发式 additional_repeats 作为目标
+        - 主阶段：用单位计算改进最优的 best_j-1 作为目标，可与启发式混合
+    - 说明：不在推理时回退到启发式，保证与算数滑窗解耦
     """
     def __init__(
         self,
@@ -752,31 +671,211 @@ class LearnableWindowStrategy(SlidingWindowStrategy):
         adapt_low_action: str = 'shrink',
         vol_low_threshold: float = None,
     ):
+        super(LearnableWindowStrategy, self).__init__(model, criterion, optimizer)
         assert policy_model is not None and policy_optimizer is not None, "LearnableWindowStrategy 需要提供 policy_model 与 policy_optimizer"
-        super().__init__(
-            model,
-            criterion,
-            optimizer,
-            window_size=window_size,
-            loss_threshold=loss_threshold,
-            max_repeats=max_repeats,
-            trend_threshold=trend_threshold,
-            vol_threshold=vol_threshold,
-            window_min_size=window_min_size,
-            volatility_mode=volatility_mode,
-            policy_model=policy_model,
-            policy_optimizer=policy_optimizer,
-            policy_warmup_epochs=policy_warmup_epochs,
-            policy_supervise_weight=policy_supervise_weight,
-            policy_main_weight=policy_main_weight,
-            policy_epsilon=policy_epsilon,
-            weight_trend=weight_trend,
-            weight_zloss=weight_zloss,
-            weight_vol=weight_vol,
-            adaptive_window=adaptive_window,
-            window_small=window_small,
-            window_large=window_large,
-            adapt_high_action=adapt_high_action,
-            adapt_low_action=adapt_low_action,
-            vol_low_threshold=vol_low_threshold,
-        )
+
+        # 滑窗统计参数（与算数滑窗保持一致，便于生成监督信号）
+        self.window_size = window_size
+        self.loss_threshold = loss_threshold
+        self.max_repeats = max_repeats
+        self.trend_threshold = trend_threshold
+        self.vol_threshold = vol_threshold
+        self.window_min_size = window_min_size
+        self.loss_window = deque(maxlen=window_size)
+        self.volatility_mode = volatility_mode
+        self.weight_trend = float(weight_trend)
+        self.weight_zloss = float(weight_zloss)
+        self.weight_vol = float(weight_vol)
+        self.adaptive_window = bool(adaptive_window)
+        self.window_small = int(window_small) if window_small is not None else int(max(window_min_size, min(window_size, 3)))
+        self.window_large = int(window_large) if window_large is not None else int(max(window_size, 2 * window_size))
+        self.adapt_high_action = adapt_high_action
+        self.adapt_low_action = adapt_low_action
+        self.vol_low_threshold = float(vol_low_threshold) if vol_low_threshold is not None else float(0.5 * vol_threshold)
+
+        # 可学习组件
+        self.policy_model = policy_model
+        self.policy_optimizer = policy_optimizer
+        self.policy_warmup_epochs = int(policy_warmup_epochs)
+        self.policy_supervise_weight = float(policy_supervise_weight)
+        self.policy_main_weight = float(policy_main_weight)
+        self.policy_epsilon = float(policy_epsilon)
+        self.batch_history = []
+
+    def _compute_trend_std(self, series):
+        n = len(series)
+        if n < 2:
+            return 0.0, 0.0
+        trend = (series[-1] - series[0]) / max(1, (n - 1))
+        std = float(np.std(series))
+        return float(trend), std
+
+    def _compute_window_diagnostics(self, initial_loss: float):
+        """返回启发式诊断与 additional_repeats（仅作监督使用）。"""
+        if len(self.loss_window) >= self.window_min_size:
+            full_losses = list(self.loss_window)
+            if self.adaptive_window:
+                cur_std = float(np.std(full_losses))
+                if cur_std > self.vol_threshold:
+                    action = self.adapt_high_action
+                elif cur_std < self.vol_low_threshold:
+                    action = self.adapt_low_action
+                else:
+                    action = 'none'
+                if action == 'expand':
+                    effective_ws = min(len(full_losses), self.window_large)
+                elif action == 'shrink':
+                    effective_ws = min(len(full_losses), self.window_small)
+                else:
+                    effective_ws = min(len(full_losses), self.window_size)
+            else:
+                action = 'none'
+                effective_ws = min(len(full_losses), self.window_size)
+
+            recent_losses = full_losses[-effective_ws:]
+            trend, std_dev = self._compute_trend_std(recent_losses)
+            mean_loss = float(np.mean(recent_losses))
+            safe_std = max(std_dev, 1e-8)
+            z_loss = (initial_loss - mean_loss) / safe_std
+            norm_trend = trend / safe_std
+
+            risk = 0.0
+            if norm_trend > self.trend_threshold:
+                risk += self.weight_trend * (norm_trend - self.trend_threshold)
+            if initial_loss > self.loss_threshold:
+                risk += max(0.0, self.weight_zloss * z_loss)
+            if std_dev > self.vol_threshold:
+                vol_term = self.weight_vol * (std_dev - self.vol_threshold) / max(self.vol_threshold, 1e-8)
+                if self.volatility_mode == 'suppress':
+                    risk -= vol_term
+                else:
+                    risk += vol_term
+            heuristic_additional = int(np.clip(np.round(risk), 0, self.max_repeats))
+            diagnostics = {
+                'trend': float(trend),
+                'std_dev': float(std_dev),
+                'mean_loss': float(mean_loss),
+                'z_loss': float(z_loss),
+                'norm_trend': float(norm_trend),
+                'risk': float(risk),
+                'trend_threshold': float(self.trend_threshold),
+                'vol_threshold': float(self.vol_threshold),
+                'loss_threshold': float(self.loss_threshold),
+                'weight_trend': float(self.weight_trend),
+                'weight_zloss': float(self.weight_zloss),
+                'weight_vol': float(self.weight_vol),
+                'adaptive_window': bool(self.adaptive_window),
+                'effective_window_size': int(effective_ws),
+                'adapt_action': action,
+                'vol_low_threshold': float(self.vol_low_threshold),
+            }
+        else:
+            heuristic_additional = 0
+            diagnostics = {
+                'trend': 0.0,
+                'std_dev': 0.0,
+                'mean_loss': float(initial_loss),
+                'z_loss': 0.0,
+                'norm_trend': 0.0,
+                'risk': 0.0,
+                'adaptive_window': bool(self.adaptive_window),
+                'effective_window_size': int(max(1, len(self.loss_window))),
+                'adapt_action': 'none',
+                'vol_low_threshold': float(self.vol_low_threshold),
+            }
+        return heuristic_additional, diagnostics
+
+    def train_batch(self, inputs, targets):
+        self.model.train()
+        self.policy_model.train()
+
+        total_loss = 0.0
+        # 初始前向：仅用于诊断与启发式监督，不参与反传
+        with torch.no_grad():
+            initial_outputs = self.model(inputs)
+            initial_loss = float(self.criterion(initial_outputs, targets).item())
+
+        # 仅用于监督的启发式 additional 与诊断
+        heuristic_additional, diagnostics = self._compute_window_diagnostics(initial_loss)
+
+        # 策略网络推理（不回退启发式）
+        delta_cur_mean = initial_loss - diagnostics.get('mean_loss', initial_loss)
+        z_loss = diagnostics.get('z_loss', 0.0) if len(self.loss_window) >= self.window_min_size else 0.0
+        norm_trend = diagnostics.get('norm_trend', 0.0) if len(self.loss_window) >= self.window_min_size else 0.0
+        policy_feat = torch.tensor([[float(z_loss), float(norm_trend), float(diagnostics.get('std_dev', 0.0)),
+                                     float(diagnostics.get('mean_loss', initial_loss)), float(initial_loss), float(delta_cur_mean)]],
+                                   dtype=torch.float32)
+        policy_out = self.policy_model(policy_feat).squeeze(0).squeeze(0)
+        raw_pred_additional = float(policy_out.detach().cpu().item())
+        if np.random.rand() < self.policy_epsilon:
+            additional_repeats = np.random.randint(0, self.max_repeats + 1)
+        else:
+            additional_repeats = int(np.clip(round(raw_pred_additional), 0, self.max_repeats))
+
+        repeat_count = min(1 + additional_repeats, 5)
+
+        # 训练该批次
+        batch_history = []
+        for _ in range(repeat_count):
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs, targets)
+            loss.backward()
+            self.optimizer.step()
+            lv = float(loss.item())
+            total_loss += lv
+            batch_history.append(lv)
+
+        avg_loss = total_loss / max(1, repeat_count)
+
+        # 更新滑窗
+        self.loss_window.append(initial_loss)
+
+        # 计算主反馈 best_j
+        with torch.no_grad():
+            if len(batch_history) > 0:
+                improvements = []
+                for j in range(1, len(batch_history) + 1):
+                    loss_j = batch_history[j - 1]
+                    improvements.append(((initial_loss - loss_j) / j))
+                best_j = int(np.argmax(improvements) + 1)
+            else:
+                best_j = 1
+
+        # 策略网络训练（两阶段）
+        self.policy_optimizer.zero_grad()
+        policy_out2 = self.policy_model(policy_feat).squeeze(0).squeeze(0)
+        loss_terms = []
+        if self.current_epoch < self.policy_warmup_epochs and self.policy_supervise_weight > 0:
+            warmup_target = torch.tensor(float(heuristic_additional), dtype=torch.float32)
+            loss_terms.append(self.policy_supervise_weight * nn.MSELoss()(policy_out2, warmup_target))
+            policy_phase = 'warmup_heuristic'
+        else:
+            main_target = torch.tensor(float(max(0, best_j - 1)), dtype=torch.float32)
+            if self.policy_main_weight > 0:
+                loss_terms.append(self.policy_main_weight * nn.MSELoss()(policy_out2, main_target))
+            if self.policy_supervise_weight > 0:
+                warmup_target = torch.tensor(float(heuristic_additional), dtype=torch.float32)
+                loss_terms.append(self.policy_supervise_weight * nn.MSELoss()(policy_out2, warmup_target))
+            policy_phase = 'main_feedback'
+        policy_loss = torch.stack([lt if isinstance(lt, torch.Tensor) else torch.tensor(lt) for lt in loss_terms]).sum() if len(loss_terms) else torch.tensor(0.0)
+        policy_loss.backward()
+        self.policy_optimizer.step()
+
+        # 记录
+        record = {
+            'initial_loss': float(initial_loss),
+            'repeat_count': int(repeat_count),
+            'loss_history': batch_history,
+            'additional_repeats': int(additional_repeats),
+            'heuristic_additional': int(heuristic_additional),
+            'used_policy': True,
+            'policy_loss': float(policy_loss.detach().cpu().item()) if isinstance(policy_loss, torch.Tensor) else float(policy_loss),
+            'raw_pred_additional': float(raw_pred_additional),
+            'policy_phase': policy_phase,
+            'best_j_from_feedback': int(best_j),
+        }
+        record.update(diagnostics)
+        self.batch_history.append(record)
+
+        return avg_loss, repeat_count

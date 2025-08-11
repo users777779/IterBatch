@@ -5,7 +5,7 @@
 ## 目录结构
 
 - `train.py`: 统一训练脚本（支持选择并对比多种策略）
-- `strategy.py`: 策略实现（Baseline/ABR/Learnable/SlidingWindow/LearnableWindow）
+- `strategy.py`: 策略实现（Baseline/ABR（算数）/Learnable（学习ABR）/SlidingWindow（算数）/LearnableWindow（学习滑窗））
 - `model.py`: 主模型 `MLP` 与调度模型 `SchedulerMLP`
 - `presets.py`: 预设超参（快速复现最佳与备选配置）
 - `data_loader.py`: 数据加载与标准化（加州房价）
@@ -34,7 +34,7 @@ conda activate abr-regression
 
 ## 策略设计与实现
 
-所有策略均继承自 `BaseTrainingStrategy`，对外暴露统一的 `train_batch(inputs, targets)` 接口，返回 `(avg_loss, repeat_count)`。
+所有策略均继承自 `BaseTrainingStrategy`，对外暴露统一的 `train_batch(inputs, targets)` 接口，返回 `(avg_loss, repeat_count)`。学习类策略与算数类策略彻底解耦，避免在算数策略内开启可学习分支。
 
 - 基线策略 Baseline
   - 每个批次只训练一次（一次前向 + 反向 + 更新）
@@ -53,18 +53,18 @@ conda activate abr-regression
   - 将平滑后的输出四舍五入并裁剪到 [1,5] 作为重复次数；初始化对输出做轻微偏置避免恒为 1
   - 批次历史包含 `scheduler_phase/best_j_from_feedback` 等诊断信息
 
-- 滑动窗口策略 Sliding Window
+- 滑动窗口策略 Sliding Window（算数）
   - 维护最近 `window_size` 个批次初始损失，计算简单斜率 `trend=(last-first)/(n-1)` 与窗口标准差 `std_dev`
   - 将当前损失做 z-score 标准化：`z_loss=(initial_loss-mean)/std`，并将 `trend/std` 作为 `norm_trend`
-  - 波动处理模式：`--volatility_mode suppress|encourage` 分别表示当波动高时抑制或鼓励增加重复
-  - 自适应窗口：`--adaptive_window` 启用后，基于当前波动大小在 `window_small|window_size|window_large` 中动态切换；
-    - `--adapt_high_action expand|shrink`：高波动时扩大/缩小窗口；
-    - `--adapt_low_action expand|shrink`：低波动时扩大/缩小窗口；
-    - `--vol_low_threshold`：低波动阈值（默认 `0.5*vol_threshold`）。
-  - 风险评分：当 `norm_trend` 超阈值（上升趋势）、`initial_loss` 高于阈值（困难批次）时增加风险；波动项按模式正负加权
-  - `additional_repeats=round(risk)` 并裁剪到 `[0, max_repeats]`，总重复次数 `repeat_count=1+additional_repeats`，再裁剪到不超过 5
-  - 可选“可学习决策网络”：`--use_window_policy` 启用后以小型 MLP 回归附加重复数，预热阶段用启发式 additional 监督，主阶段用主模型反馈的 `best_j-1` 监督，可与启发式混合
-  - 批次历史记录包含诊断字段与 `used_policy/policy_phase/best_j_from_feedback` 等
+  - 波动处理模式：`--volatility_mode suppress|encourage` 对应高波动的惩罚/鼓励项
+  - 自适应窗口：`--adaptive_window` 启用后，基于波动度在 `window_small|window_size|window_large` 中动态切换；`--adapt_high_action`/`--adapt_low_action`、`--vol_low_threshold`
+  - 风险评分线性组合：`additional_repeats=round(risk)` 裁剪到 `[0, max_repeats]`；`repeat_count=clip(1+additional, <=5)`
+  - 不包含任何可学习分支（学习逻辑见下一条）
+
+- 可学习滑动窗口 LearnableWindow（学习）
+  - 推理完全由策略网络输出 `additional_repeats`（ε-greedy + 裁剪），不回退启发式；
+  - 训练两阶段：预热（启发式 additional 监督）与主阶段（主模型反馈的 `best_j-1` 监督，可与启发式混合）；
+  - 批次历史包含 `used_policy=True` 与监督/诊断信息。
 
 参数入口（来自 `train.py --help`）：
 
@@ -85,7 +85,7 @@ conda activate abr-regression
   - 预设：`--preset window_best_v1 | window_stable_v1 | window_adaptive_v1`
   - 自适应：`--adaptive_window`, `--window_small`, `--window_large`, `--adapt_high_action`, `--adapt_low_action`, `--vol_low_threshold`
   - 权重与阈值：`--trend_threshold`, `--vol_threshold`, `--window_min_size`, `--weight_trend`, `--weight_zloss`, `--weight_vol`
-  - 决策网络：`--use_window_policy` 或直接使用 `--strategies lwindow`；`--window_policy_hidden`, `--policy_*`
+  - 决策网络：仅在 `--strategies lwindow` 下生效；`--window_policy_hidden`, `--policy_*`
 
 ## 训练与对比
 
@@ -108,6 +108,7 @@ python train.py --strategies baseline abr learnable window --val_ratio 0.1 --ear
   - R2: 决定系数（按 batch 近似计算：`1 - SSE/SST`，再做样本加权求 epoch 均值）
 - TensorBoard：位于 `results/tensorboard/<dataset>_<timestamp>/<strategy>`。
   - 每种策略使用独立子运行目录，并使用统一的标量标签（如 `Loss/Train`、`R2/Test`），便于在 TensorBoard 前端勾选多条曲线进行同图对比。
+  - 当 `val_ratio==0.0` 时，不写入 `Val` 曲线；只有显式划分验证集时才会绘制 `Val` 曲线。
   - 可视化：
   
     ```bash
@@ -115,7 +116,7 @@ python train.py --strategies baseline abr learnable window --val_ratio 0.1 --ear
     # 浏览器打开 http://localhost:6006
     ```
 
-备注：当未设置验证集（`--val_ratio 0.0`）时，显示在 `Val` 名称下的曲线会等价于 `Test` 指标（训练脚本内部已退化为使用测试集做验证统计）。
+备注：当未设置验证集（`--val_ratio 0.0`）时，不会绘制 `Val` 曲线；开启验证集后才有 `Val` 曲线与早停监控。
 
 - 逐批次写入（便于细粒度对比策略）：
   - `.../Batch/Loss|RMSE|MAE|R2`，非 Baseline 额外写入 `.../Batch/Repeats`
@@ -128,8 +129,9 @@ python train.py --strategies baseline abr learnable window --val_ratio 0.1 --ear
 ## 已知限制与注意事项
 
 - `--dataset boston` 当前未在 `data_loader.py` 中实现，传入会报错；请使用 `--dataset california`
-- TensorBoard 日志目录会在每次运行前被清空，仅保留本次实验日志
+- TensorBoard 日志目录按时间戳新建子目录，保留历史记录，便于多次运行横向对比
 - `SlidingWindowStrategy` 的 `max_repeats` 为附加重复次数的上限，最终训练次数受裁剪（最多 5 次）影响
+- 实现优化：对仅用于“决策/诊断/监督”的初始前向与指标计算统一包裹 `torch.no_grad()`，减少无用计算图构建与内存占用。
 
 ## 复现实验建议
 
@@ -153,14 +155,7 @@ python train.py --strategies baseline abr window --loss_threshold 0.3 --max_repe
 python train.py --strategies baseline learnable --scheduler_warmup_epochs 5 --scheduler_supervise_weight 1.0 --scheduler_main_weight 1.0 --val_ratio 0.1 --early_stopping --patience 5
 ```
 
- 1. 滑动窗口扩展/可学习：
-
-```bash
-python train.py --strategies window --volatility_mode suppress --window_size 5 --max_repeats 3 \
-  --use_window_policy --window_policy_hidden 32 --policy_warmup_epochs 2 --policy_supervise_weight 1.0 --policy_main_weight 1.0 --policy_epsilon 0.1
-```
-
- 1. 独立可学习滑动窗口（lwindow）：
+  1. 学习滑动窗口（lwindow）：
 
 ```bash
 python train.py --strategies lwindow --volatility_mode suppress --window_size 5 --max_repeats 3 \

@@ -64,12 +64,12 @@ def parse_args():
     parser.add_argument('--scheduler_main_weight', type=float, default=1.0, help='Learnable 中主模型反馈项的损失权重')
 
     # Window 可学习策略参数
-    parser.add_argument('--use_window_policy', action='store_true', help='是否启用滑动窗口的可学习决策网络')
-    parser.add_argument('--window_policy_hidden', type=int, default=32, help='滑动窗口策略决策网络的隐藏维度')
-    parser.add_argument('--policy_warmup_epochs', type=int, default=0, help='窗口策略网络预热轮数（用启发式 additional 监督）')
-    parser.add_argument('--policy_supervise_weight', type=float, default=1.0, help='窗口策略启发式监督损失权重')
-    parser.add_argument('--policy_main_weight', type=float, default=1.0, help='窗口策略主反馈损失权重')
-    parser.add_argument('--policy_epsilon', type=float, default=0.0, help='窗口策略 ε-greedy 探索率')
+    # 学习滑窗（lwindow）专用参数（保留 CLI，window 将忽略这些参数）
+    parser.add_argument('--window_policy_hidden', type=int, default=32, help='学习滑窗策略的决策网络隐藏维度（仅 lwindow 生效）')
+    parser.add_argument('--policy_warmup_epochs', type=int, default=0, help='学习滑窗预热轮数（启发式 additional 监督，仅 lwindow 生效）')
+    parser.add_argument('--policy_supervise_weight', type=float, default=1.0, help='学习滑窗启发式监督损失权重（仅 lwindow 生效）')
+    parser.add_argument('--policy_main_weight', type=float, default=1.0, help='学习滑窗主反馈损失权重（仅 lwindow 生效）')
+    parser.add_argument('--policy_epsilon', type=float, default=0.0, help='学习滑窗 ε-greedy 探索率（仅 lwindow 生效）')
     # 预设
     parser.add_argument('--preset', type=str, default=None, help='使用命名预设（见 presets.py）')
     return parser.parse_args()
@@ -107,13 +107,7 @@ def get_strategy(model, criterion, optimizer, strategy_name, args):
             scheduler_main_weight=args.scheduler_main_weight,
         )
     elif strategy_name == 'window':
-        # 可选可学习决策网络
-        policy_model = None
-        policy_optimizer = None
-        if args.use_window_policy:
-            from model import WindowPolicyMLP
-            policy_model = WindowPolicyMLP(hidden_dim=args.window_policy_hidden)
-            policy_optimizer = optim.Adam(policy_model.parameters(), lr=args.lr)
+        # 纯启发式滑窗：忽略所有可学习参数
         return SlidingWindowStrategy(
             model,
             criterion,
@@ -125,12 +119,6 @@ def get_strategy(model, criterion, optimizer, strategy_name, args):
             vol_threshold=args.vol_threshold,
             window_min_size=args.window_min_size,
             volatility_mode=args.volatility_mode,
-            policy_model=policy_model,
-            policy_optimizer=policy_optimizer,
-            policy_warmup_epochs=args.policy_warmup_epochs,
-            policy_supervise_weight=args.policy_supervise_weight,
-            policy_main_weight=args.policy_main_weight,
-            policy_epsilon=args.policy_epsilon,
             weight_trend=args.weight_trend,
             weight_zloss=args.weight_zloss,
             weight_vol=args.weight_vol,
@@ -272,11 +260,11 @@ def train_single_strategy(strategy_name, args, data_loader, input_dim, writer):
         avg_accuracy = total_accuracy / count
         avg_repeats = total_repeats / len(train_loader)
         
-        # 在验证/测试集上评估
+        # 在验证/测试集上评估（无验证集时不计算/不回填）
         if val_loader is not None:
             val_loss, val_rmse, val_mae = strategy.evaluate(val_loader)
         else:
-            val_loss, val_rmse, val_mae = strategy.evaluate(test_loader)
+            val_loss = val_rmse = val_mae = None
 
         test_loss, test_rmse, test_mae = strategy.evaluate(test_loader)
         
@@ -314,17 +302,20 @@ def train_single_strategy(strategy_name, args, data_loader, input_dim, writer):
         
         # Loss metrics
         writer.add_scalar('Loss/Train', avg_loss, epoch)
-        writer.add_scalar('Loss/Val', val_loss, epoch)
+        if val_loss is not None:
+            writer.add_scalar('Loss/Val', val_loss, epoch)
         writer.add_scalar('Loss/Test', test_loss, epoch)
         
         # RMSE metrics
         writer.add_scalar('RMSE/Train', avg_rmse, epoch)
-        writer.add_scalar('RMSE/Val', val_rmse, epoch)
+        if val_rmse is not None:
+            writer.add_scalar('RMSE/Val', val_rmse, epoch)
         writer.add_scalar('RMSE/Test', test_rmse, epoch)
         
         # MAE metrics
         writer.add_scalar('MAE/Train', avg_mae, epoch)
-        writer.add_scalar('MAE/Val', val_mae, epoch)
+        if val_mae is not None:
+            writer.add_scalar('MAE/Val', val_mae, epoch)
         writer.add_scalar('MAE/Test', test_mae, epoch)
         
         # R2 metrics
@@ -347,13 +338,14 @@ def train_single_strategy(strategy_name, args, data_loader, input_dim, writer):
         if strategy_name != 'baseline':
             print(f"  平均重复次数: {avg_repeats:.2f}")
 
-        # 保存指标历史（便于对比曲线）
+        # 保存指标历史：始终保存 Test 到 test_* 槽位；若存在 Val，则额外保存到 val_* 槽位
+        strategy.save_metrics_with_accuracy(epoch, avg_loss, avg_rmse, avg_mae, avg_accuracy,
+                                            test_loss, test_rmse, test_mae, test_accuracy)
         if val_loader is not None:
-            strategy.save_metrics_with_accuracy(epoch, avg_loss, avg_rmse, avg_mae, avg_accuracy,
-                                               val_loss, val_rmse, val_mae, val_accuracy)
-        else:
-            strategy.save_metrics_with_accuracy(epoch, avg_loss, avg_rmse, avg_mae, avg_accuracy,
-                                               test_loss, test_rmse, test_mae, test_accuracy)
+            strategy.metrics_history['val_loss'].append(val_loss)
+            strategy.metrics_history['val_rmse'].append(val_rmse)
+            strategy.metrics_history['val_mae'].append(val_mae)
+            strategy.metrics_history['val_accuracy'].append(val_accuracy)
 
         # 早停（使用验证集上的 Loss；若无验证集则使用测试集）
         if args.early_stopping:
