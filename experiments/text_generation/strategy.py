@@ -1,3 +1,18 @@
+"""文本生成任务的训练策略集合（解耦版）
+
+包含五种互相低耦合的策略，均继承自 `BaseTrainingStrategy`：
+- Baseline：每批仅一次反传（对照）
+- ABR（算数）：基于初始损失动态决定重复次数
+- Learnable（学习ABR）：调度网络根据 [loss, ppl] 预测重复次数，在线学习
+- SlidingWindow（算数）：用窗口内损失的趋势/波动/z-loss 计算风险并映射重复次数（支持自适应窗口）
+- LearnableWindow（学习滑窗）：策略网络回归附加重复数；启发式仅用于监督信号（两阶段：预热/主反馈）
+
+公共能力：
+- outlier 跳过：若当前批次损失显著高于历史均值（mean+K*std），本批跳过反传并记录到 `outlier_records`，供后续人工复核；
+- 药引子：通过 `--primer_batches` 先用高质量样本稳定统计；
+- 评估聚合：loss/ppl 按有效 token 数加权聚合，指标更准确。
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -95,9 +110,13 @@ class BaseTrainingStrategy:
         total_tokens = 0
         for batch in data_loader:
             loss = self.compute_loss(batch)
-            bs, seqlen = batch['input_ids'].shape
-            total_loss += loss.item() * bs
-            total_tokens += bs
+            # 按有效 token 计数聚合（更准确）
+            if isinstance(batch.get('attention_mask', None), torch.Tensor):
+                token_count = int(batch['attention_mask'].sum().item())
+            else:
+                token_count = int(batch['input_ids'].numel())
+            total_loss += float(loss.item()) * token_count
+            total_tokens += token_count
         avg_loss = total_loss / max(1, total_tokens)
         ppl = float(np.exp(avg_loss))
         return avg_loss, ppl
