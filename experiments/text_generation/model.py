@@ -94,3 +94,24 @@ class SchedulerLLaMA(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class WindowPolicyMLP(nn.Module):
+    """可学习滑窗策略的决策网络
+    输入特征: [z_loss, norm_trend, std_dev, mean_loss, initial_loss, delta_cur_mean]
+    输出: 预测附加重复次数（实数）
+    """
+    def __init__(self, input_dim: int = 6, hidden_dim: int = 32, output_dim: int = 1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
