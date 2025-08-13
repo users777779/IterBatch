@@ -346,11 +346,7 @@ def main():
             decider_input_v1 = torch.tensor([[loss_v1.item(), acc_v1, loss_ratio_v1, acc_gap_v1]], dtype=torch.float32, device=device)
             action_logits_v1 = decider_v1(decider_input_v1)
             action_probs_v1 = torch.softmax(action_logits_v1, dim=-1)
-            # # ε-greedy 策略：前10个epoch探索，之后保留最小探索值
-            # epsilon = max(0.02, 0.2 * max(0.0, 1.0 - (epoch-1)/10.0))
-            # if torch.rand(1).item() < epsilon:
-            #     action_v1 = torch.randint(0, 2, (1,), device=device)
-            # else:
+        
             action_v1 = action_probs_v1.argmax(dim=-1)
             # 使用新的V1监督信号（需依赖 recent_losses_v1/recent_accs_v1 队列）
             label_v1 = generate_supervision_signal(
